@@ -1,0 +1,4 @@
+test_report.txt
+*.tmp
+*.asv
+_backup/
