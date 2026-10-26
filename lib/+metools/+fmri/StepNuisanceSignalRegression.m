@@ -1,11 +1,14 @@
 classdef StepNuisanceSignalRegression < metools.Step
     % STEPNUISANCESIGNALREGRESSION  Regresses nuisance signals out of every voxel, together
-    % with a temporal band-pass filter and optional censoring (spike regressors).
+    % with a temporal band-pass filter and optional censoring of high-motion scans.
     %
     % Everything the regression contains is set by parameters, and the complete design
     % matrix is saved with named columns. The model (see docs/steps/NuisanceSignalRegression.md):
     %
-    %   y_clean = y - X*beta + constant,   X = [motion, FD, tissue, spikes, DCT filter basis]
+    %   y_clean = y - X*beta + constant,   X = [motion, FD, tissue, DCT filter basis]
+    %
+    % With censoring, beta is estimated from the uncensored scans, the censored scans are
+    % interpolated and only then the low-pass part of the filter is applied.
     %
     %   reads   Signal  (bold)       exactly one file; the tissue signals are extracted from it
     %                                (normally the normalized, UNSMOOTHED data)
@@ -31,9 +34,10 @@ classdef StepNuisanceSignalRegression < metools.Step
     %   CompCorComponents  components per mask for 'acompcor' (5)
     %   Band               pass band [low high] in Hz ([1/128 Inf] = SPM high-pass 128 s,
     %                      no low-pass); e.g. [0.008 0.09]. low = 0: no high-pass
-    %   ScrubFd            FD threshold in mm for censoring ([] = no censoring); every
-    %                      censored scan gets a spike regressor
+    %   ScrubFd            FD threshold in mm for censoring ([] = no censoring)
     %   ScrubNeighbors     [before after] scans censored around each outlier ([0 0])
+    %   CensorInterp       'pchip' | 'linear' | 'spline' ('pchip')  interpolation of the
+    %                      censored scans before the low-pass
     %   MasksDir (cfg.paths.masks), WmMask ('WM09.nii'), CsfMask ('CSFmaskVENTlat.nii'),
     %   TR (cfg.acq.TR), Prefix ('q'), CovarsName, DesignName ('' = derived from the output)
     %
@@ -41,7 +45,7 @@ classdef StepNuisanceSignalRegression < metools.Step
     % TissueSignals='mean', Band=[1/128 Inf], ScrubFd=[].
     %
     %   computation metools.fmri.proc.motionRegressors, framewiseDisplacement, maskSignal,
-    %               compCor, outlierScans, nuisanceDesign, regressOut
+    %               compCor, outlierScans, dctFilterBasis, nuisanceDesign, regressOut
 
     properties
         MotionModel (1,1) double {mustBeMember(MotionModel, [0 6 12 24])} = 24
@@ -52,6 +56,7 @@ classdef StepNuisanceSignalRegression < metools.Step
         Band (1,2) double {mustBeNonnegative} = [1/128 Inf]
         ScrubFd double {mustBeScalarOrEmpty, mustBePositive} = []
         ScrubNeighbors (1,2) double {mustBeInteger, mustBeNonnegative} = [0 0]
+        CensorInterp char {mustBeMember(CensorInterp, {'pchip', 'linear', 'spline'})} = 'pchip'
         MasksDir char = ''
         WmMask char = 'WM09.nii'
         CsfMask char = 'CSFmaskVENTlat.nii'
@@ -140,26 +145,34 @@ classdef StepNuisanceSignalRegression < metools.Step
             names = [names tissueNames];
 
             % censoring
-            spikes = false(n, 1);
+            censored = false(n, 1);
             if ~isempty(obj.ScrubFd)
-                spikes = metools.fmri.proc.outlierScans(fd, obj.ScrubFd, ...
+                censored = metools.fmri.proc.outlierScans(fd, obj.ScrubFd, ...
                     Before = obj.ScrubNeighbors(1), After = obj.ScrubNeighbors(2));
             end
 
-            [X, xnames, c] = metools.fmri.proc.nuisanceDesign(regs, names, tr, Band = obj.Band, Spikes = spikes);
-            nFilter = size(X, 2) - size(regs, 2) - nnz(spikes);
-            fprintf(['Nuisance regression: %d scans, %d columns = %d regressors (motion %d, FD %d, ' ...
-                'tissue %d) + %d spikes + %d filter (band %g-%g Hz, incl. constant); %d degrees of freedom left.\n'], ...
-                n, size(X, 2), size(regs, 2), obj.MotionModel, double(obj.FdRegressor), size(tissue, 2), ...
-                nnz(spikes), nFilter, obj.Band(1), obj.Band(2), n - rank(X));
-            if size(X, 2) >= n
+            [X, xnames, c, lp] = metools.fmri.proc.nuisanceDesign(regs, names, tr, Band = obj.Band);
+            nFilter = size(X, 2) - size(regs, 2);
+            used = nnz(~censored);
+            fprintf(['Nuisance regression: %d scans (%d censored), %d columns = %d regressors (motion %d, ' ...
+                'FD %d, tissue %d) + %d filter (band %g-%g Hz, incl. constant, %d low-pass); ' ...
+                'about %d degrees of freedom left.\n'], ...
+                n, nnz(censored), size(X, 2), size(regs, 2), obj.MotionModel, double(obj.FdRegressor), ...
+                size(tissue, 2), nFilter, obj.Band(1), obj.Band(2), numel(lp), used - rank(X(~censored, :)));
+            if size(X, 2) - numel(lp) >= used
                 error('NuisanceSignalRegression:Saturated', ...
-                    'The design has %d columns for %d scans - nothing would be left of the data.', size(X, 2), n);
+                    'The design has %d columns for %d uncensored scans - nothing would be left of the data.', ...
+                    size(X, 2) - numel(lp), used);
+            end
+            if any(censored)
+                fprintf(['Censoring: betas from the %d uncensored scans, censored scans interpolated (%s)' ...
+                    ' before the low-pass.\n'], used, obj.CensorInterp);
             end
 
-            metools.fmri.proc.regressOut(target, out.Out{1}, X, Keep = c);
+            metools.fmri.proc.regressOut(target, out.Out{1}, X, Keep = c, Censored = censored, LowPass = lp, ...
+                Interp = obj.CensorInterp);
             metools.util.writeTsv(out.Covars{1}, [{'framewise_displacement', 'outlier'} tissueNames], ...
-                [fd double(spikes) tissue]);
+                [fd double(censored) tissue]);
             metools.util.writeTsv(out.Design{1}, xnames, X);
         end
 
@@ -169,14 +182,14 @@ classdef StepNuisanceSignalRegression < metools.Step
             outl = cov(:, strcmp(h, 'outlier'));
             [X, xnames] = metools.util.readTsv(out.Design{1});
             isFilter = startsWith(xnames, 'dct_');
-            isSpike = startsWith(xnames, 'motion_outlier');
+            u = ~(outl > 0);
             items = {struct('Title', 'Scans', 'Value', size(X, 1)), ...
-                struct('Title', 'Nuisance regressors (without spikes and filter)', 'Value', nnz(~isFilter & ~isSpike)), ...
-                struct('Title', 'Censored scans (spike regressors)', 'Value', nnz(outl)), ...
+                struct('Title', 'Nuisance regressors (without filter)', 'Value', nnz(~isFilter)), ...
+                struct('Title', 'Censored scans', 'Value', nnz(~u)), ...
                 struct('Title', 'Filter basis columns (incl. constant)', 'Value', nnz(isFilter)), ...
-                struct('Title', 'Degrees of freedom left', 'Value', size(X, 1) - rank(X)), ...
+                struct('Title', 'Degrees of freedom left (approx.)', 'Value', nnz(u) - rank(X(u, :))), ...
                 struct('Title', 'Mean framewise displacement (mm)', 'Value', mean(fd)), ...
-                struct('Title', 'Regressors', 'Text', strjoin(xnames(~isFilter & ~isSpike), ', '))};
+                struct('Title', 'Regressors', 'Text', strjoin(xnames(~isFilter), ', '))};
         end
     end
 

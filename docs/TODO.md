@@ -59,11 +59,10 @@ original Cosmic2 pipeline; each fix will change the results and needs a new comp
   `<out>_design.tsv`), so several regressions in one pipeline do not collide.
 - [ ] NuisanceSignalRegression: the tissue signals are computed again by every instance
   of the step (two cleanings = two extractions); cheap, but could be shared.
-- [ ] **NuisanceSignalRegression: censoring + low-pass.** With spike regressors and a
-  finite `Band(2)` the pass-band signal is pulled towards the mean around every censored
-  scan (shown by `ProcTest/bandPassRegression`). Option: estimate the betas on the
-  uncensored scans, interpolate the censored scans of the residuals, then apply the
-  low-pass (Power et al. 2014, XCP-D). Changes the results of the connectivity variant.
+- [x] **NuisanceSignalRegression: censoring + low-pass.** With spike regressors and a
+  finite `Band(2)` the pass-band signal was pulled towards the mean around every censored
+  scan. Now: betas from the uncensored scans, censored scans interpolated, then the
+  low-pass (Power et al. 2014); see `regressOut`.
 - [ ] NuisanceSignalRegression: global signal regression and DVARS-based censoring are
   not implemented.
 - [ ] Parcellation: nothing checks that the atlas and the data are in the same space.

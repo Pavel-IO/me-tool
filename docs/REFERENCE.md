@@ -277,7 +277,7 @@ of every step is in [steps/](steps/README.md).
 | `Normalize` | in `In` (bold, 1 file), `Mean` (bold_mean, 1 file); out `Out` follows In, `MeanOut` follows Mean, `T1Reg` (t1_coreg) | `VoxelSize` ([2.5 2.5 2.5]), `CoregResolution` ([1 1 1]) |
 | `CreateMask` | in `In` (bold, 1 file); out `Mask` (brain_mask) | `Threshold` (0.8), `Suffix` ('_mask8') |
 | `Smooth` | in `In` (bold); out `Out` (bold_smooth) | `FWHM` (6), `Prefix` ('s') |
-| `NuisanceSignalRegression` | in `Signal` (bold), `Target` (bold), `Mean` (bold_mean), `Rp` (rp), each 1 file; out `Out` follows Target, `Covars` (covars, `<out>_covars.tsv`), `Design` (design_matrix, `<out>_design.tsv`) | `MotionModel` (24; 0/6/12/24), `FdMethod` ('power'; 'legacy'), `FdRegressor` (false), `TissueSignals` ('acompcor'; 'mean', 'none'), `CompCorComponents` (5), `Band` ([1/128 Inf] Hz), `ScrubFd` ([] mm), `ScrubNeighbors` ([0 0]), `MasksDir` (cfg `paths.masks`), `TR` (cfg `acq.TR`), `CsfMask` ('CSFmaskVENTlat.nii'), `WmMask` ('WM09.nii'), `Prefix` ('q'), `CovarsName`, `DesignName` ('' = derived) |
+| `NuisanceSignalRegression` | in `Signal` (bold), `Target` (bold), `Mean` (bold_mean), `Rp` (rp), each 1 file; out `Out` follows Target, `Covars` (covars, `<out>_covars.tsv`), `Design` (design_matrix, `<out>_design.tsv`) | `MotionModel` (24; 0/6/12/24), `FdMethod` ('power'; 'legacy'), `FdRegressor` (false), `TissueSignals` ('acompcor'; 'mean', 'none'), `CompCorComponents` (5), `Band` ([1/128 Inf] Hz), `ScrubFd` ([] mm), `ScrubNeighbors` ([0 0]), `CensorInterp` ('pchip'), `MasksDir` (cfg `paths.masks`), `TR` (cfg `acq.TR`), `CsfMask` ('CSFmaskVENTlat.nii'), `WmMask` ('WM09.nii'), `Prefix` ('q'), `CovarsName`, `DesignName` ('' = derived) |
 | `Parcellation` | in `In` (bold, 1 file), optional `Mask` (brain_mask), `Covars` (covars); out `Timeseries` (roi_timeseries, optional), `Connectivity` (connectivity, optional), `Rois` (roi_info: `_rois.tsv` + `_parcellation.json`) | `Atlas` (required), `AtlasType` ('labels'; 'voxels'), `Labels` (''), `AtlasName` ('' = atlas file name), `Summary` ('mean'; 'eigen'), `Measure` ('pearsonr'; 'fisherz'), `MinCoverage` (0), `UseMask` (true), `ExcludeOutliers` (false), `SaveTimeseries` (true), `SaveConnectivity` (true) |
 
 External files checked by `dryRun`: FieldMap `<subject>/fields/_phasediff.nii` and
@@ -326,8 +326,8 @@ removed when the function ends. Options are name=value pairs.
 | `fd = framewiseDisplacement(rp, RotationUnits='radians', Radius=50, Detrend=false)` | framewise displacement (Power 2012) |
 | `out = outlierScans(fd, threshold, Before=0, After=0)` | censored scans (logical) |
 | `[X0, names] = dctFilterBasis(N, TR, band)` | DCT basis of a band-pass filter (constant, high-pass and low-pass cosines) |
-| `[X, names, c] = nuisanceDesign(R, names, TR, Band=[1/128 Inf], Spikes=[])` | design matrix: filtered regressors, spike regressors, filter basis |
-| `regressOut(fmri, outFile, X, Keep=[])` | removes the fit of X from every voxel (keeps the fit of the `Keep` columns) |
+| `[X, names, c, lp] = nuisanceDesign(R, names, TR, Band=[1/128 Inf])` | design matrix: filtered regressors and filter basis; `c` constant column, `lp` low-pass columns |
+| `regressOut(fmri, outFile, X, Keep=[], Censored=[], LowPass=[], Interp='pchip')` | removes the fit of X from every voxel (keeps the fit of the `Keep` columns); with censored scans: fit on the uncensored scans, interpolation, then the `LowPass` columns |
 | `X = nuisanceRegression(fmri, outFile, motion, signals, TR, Cutoff=128)` | the original Cosmic2 regression (motion, FD, region signals, high-pass) |
 | `res = parcellate(fmri, atlas, AtlasType='labels', Labels='', Mask='', Summary='mean', MinCoverage=0)` | ROI time courses, coverage and names |
 | `M = connectivityMatrix(ts, Measure='pearsonr')` | correlation matrix of ROI time courses (`'fisherz'` = atanh) |

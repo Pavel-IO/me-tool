@@ -292,34 +292,60 @@ classdef ProcTest < matlab.unittest.TestCase
             % cosines of the DCT basis: frequency (j-1)/(2*n*tr), here 0.03 and 0.3 Hz
             slow = cos(pi*(2*t + 1)*12/(2*n));
             fast = cos(pi*(2*t + 1)*120/(2*n));
-            data = zeros(2, 1, 1, n);
+            data = zeros(3, 1, 1, n);
             data(1, 1, 1, :) = 100 + slow + fast;
             data(2, 1, 1, :) = 50 + fast;
+            data(3, 1, 1, :) = 80 + slow;
             f = tc.write4d('a.nii', data);
 
             % band-pass alone: the slow cosine and the mean stay, the fast one goes
-            out = fullfile(tc.Root, 'qa.nii');
-            [X, names, c] = metools.fmri.proc.nuisanceDesign(zeros(n, 0), {}, tr, Band = [0.01 0.1]);
+            [X, names, c, lp] = metools.fmri.proc.nuisanceDesign(zeros(n, 0), {}, tr, Band = [0.01 0.1]);
             tc.verifyEqual(names{c}, 'dct_constant');
+            tc.verifyTrue(all(startsWith(names(lp), 'dct_lp')));
+            tc.verifyEqual(numel(lp), n - 41);
+            out = fullfile(tc.Root, 'qa.nii');
             metools.fmri.proc.regressOut(f, out, X, Keep = c);
             y = squeeze(spm_read_vols(spm_vol(out)));
             tc.verifyEqual(y(1, :)', 100 + slow, 'AbsTol', 1e-3);
             tc.verifyEqual(y(2, :)', 50*ones(n, 1), 'AbsTol', 1e-3);
+            tc.verifyEqual(y(3, :)', 80 + slow, 'AbsTol', 1e-3);
 
-            % with a censored scan: one spike column, the censored scan is set to the mean,
-            % a signal that lies entirely in the stop band is still removed completely
-            spikes = false(n, 1);
-            spikes(17) = true;
-            [X, names, c] = metools.fmri.proc.nuisanceDesign(zeros(n, 0), {}, tr, Band = [0.01 0.1], Spikes = spikes);
-            tc.verifyEqual(names{1}, 'motion_outlier01');
-            tc.verifyEqual(X(:, 1), double((1:n)' == 17));
+            % with censored scans (inside and at the start): the pass-band signal is not
+            % pulled towards the mean around them (it was, with spike regressors)
+            censored = false(n, 1);
+            censored([1 2 17 18 120]) = true;
             out = fullfile(tc.Root, 'qb.nii');
-            metools.fmri.proc.regressOut(f, out, X, Keep = c);
+            metools.fmri.proc.regressOut(f, out, X, Keep = c, Censored = censored, LowPass = lp);
             y = squeeze(spm_read_vols(spm_vol(out)));
-            tc.verifyEqual(y(2, :)', 50*ones(n, 1), 'AbsTol', 1e-3);
-            % Known limitation (see docs/steps/NuisanceSignalRegression.md): with a low-pass,
-            % the pass-band signal is pulled towards the mean around a censored scan.
-            tc.verifyGreaterThan(max(abs(y(1, 10:24)' - 100 - slow(10:24))), 0.1);
+            tc.verifyEqual(y(3, 3:end)', 80 + slow(3:end), 'AbsTol', 0.05);   % spikes: error ~1
+            tc.verifyEqual(mean(y(2, :)), 50, 'AbsTol', 0.05);
+        end
+
+        function censoringWithoutLowPassEqualsSpikes(tc)
+            % Without a low-pass, the uncensored scans get the same values as with one spike
+            % regressor per censored scan; the censored scans are interpolated.
+            tc.needSpm();
+            rs = RandStream('mt19937ar', 'Seed', 11);
+            n = 60;
+            R = randn(rs, n, 3);
+            data = 100 + randn(rs, 2, 2, 1, n);
+            f = tc.write4d('a.nii', data);
+            [X, ~, c, lp] = metools.fmri.proc.nuisanceDesign(R, {}, 2, Band = [1/128 Inf]);
+            tc.verifyEmpty(lp);
+            censored = false(n, 1);
+            censored([10 11 40]) = true;
+            out = fullfile(tc.Root, 'qa.nii');
+            metools.fmri.proc.regressOut(f, out, X, Keep = c, Censored = censored);
+            S = double((1:n)' == [10 11 40]);
+            ref = fullfile(tc.Root, 'qs.nii');
+            metools.fmri.proc.regressOut(f, ref, [S X], Keep = c + 3);
+            y = reshape(spm_read_vols(spm_vol(out)), [], n);
+            yr = reshape(spm_read_vols(spm_vol(ref)), [], n);
+            tc.verifyEqual(y(:, ~censored), yr(:, ~censored), 'AbsTol', 1e-4);
+            t = (1:n)';
+            tc.verifyEqual(y(:, 40), interp1(t(~censored), y(:, ~censored)', 40, 'pchip')', 'AbsTol', 1e-4);
+            tc.verifyError(@() metools.fmri.proc.regressOut(f, out, X, Censored = true(n, 1)), ...
+                'regressOut:TooFewScans');
         end
 
         function nuisanceRegressionMatchesLegacy(tc)

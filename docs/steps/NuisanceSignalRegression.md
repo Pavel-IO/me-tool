@@ -26,6 +26,7 @@ image that is cleaned, e.g. `bold_smooth`), `Mean` (`bold_mean`), `Rp` (`rp`); w
 | `Band` | [low high] Hz (**[1/128 Inf]**) | pass band of the temporal filter |
 | `ScrubFd` | mm or `[]` (**[]**) | FD threshold for censoring; `[]` = none |
 | `ScrubNeighbors` | [before after] (**[0 0]**) | scans censored around each outlier |
+| `CensorInterp` | `'pchip'`, `'linear'`, `'spline'` (**pchip**) | interpolation of censored scans before the low-pass |
 | `MasksDir` | folder (cfg `paths.masks`) | folder of the tissue masks |
 | `WmMask`, `CsfMask` | files (`WM09.nii`, `CSFmaskVENTlat.nii`) | tissue masks in MNI space |
 | `TR` | s (cfg `acq.TR`) | repetition time |
@@ -50,18 +51,18 @@ of the lab library), up to floating-point rounding.
 
 ## Model
 
-For every voxel time course $y$ of the `Target` image
+For every voxel time course $y$ of the `Target` image (without censoring)
 
 $$\hat\beta = X^{+} y,\qquad y_{\mathrm{clean}} = y - X\hat\beta + x_c\hat\beta_c ,$$
 
 with the design matrix
 
-$$X = [\,\tilde M,\ \widetilde{\mathrm{FD}},\ \tilde T,\ S,\ X_0\,]$$
+$$X = [\,\tilde M,\ \widetilde{\mathrm{FD}},\ \tilde T,\ X_0\,]$$
 
 where $\tilde M$ are the motion regressors, $\widetilde{\mathrm{FD}}$ the framewise
-displacement (only with `FdRegressor`), $\tilde T$ the tissue signals, $S$ the spike
-regressors of censored scans and $X_0$ the filter basis; $x_c$ is its constant column, so
-the voxel mean is kept. The tilde means that the regressor was filtered by the same band
+displacement (only with `FdRegressor`), $\tilde T$ the tissue signals and $X_0$ the
+filter basis; $x_c$ is its constant column, so the voxel mean is kept. With censoring
+the same model is fitted in three stages, see [Censoring](#censoring). The tilde means that the regressor was filtered by the same band
 as the data (projection of $X_0$: $\tilde x = x - X_0 (X_0^\top X_0)^{+} X_0^\top x$), so
 that data and regressors contain the same frequencies (Hallquist et al. 2013). Because the
 filter is part of the same regression, filtering and nuisance removal happen in one step
@@ -120,10 +121,24 @@ with cut-off $1/\mathrm{Band}(1)$ s).
 ### Censoring
 
 With `ScrubFd`, scans with $\mathrm{FD} > $ `ScrubFd` (and `ScrubNeighbors` scans before
-and after) are censored: each gets a spike regressor (1 in that scan, 0 elsewhere), which
-removes the scan from the estimation of all other betas. The cleaned value of a censored
-scan is the voxel mean. The `outlier` column of `covars` marks these scans, so later steps
-(e.g. [Parcellation](Parcellation.md) with `ExcludeOutliers`) can leave them out.
+and after) are censored. Let $u$ be the uncensored scans and $X = [A,\ L]$, where $L$ are
+the low-pass columns of the filter (cosines above `Band(2)`) and $A$ all other columns
+(regressors, constant, high-pass). Then (Power et al. 2014):
+
+1. $\hat\beta = (A_u^\top A_u)^{+} A_u^\top y_u$, i.e. the betas are estimated from the
+   uncensored scans only, and $r = y - A\hat\beta + x_c\hat\beta_c$ for all scans;
+2. $r$ at the censored scans is replaced by interpolation in time from the uncensored
+   scans (`CensorInterp`, default piecewise cubic Hermite `pchip`, which does not
+   overshoot; censored scans at the start or end take the nearest uncensored value);
+3. the low-pass is applied to the gap-free series: $y_{\mathrm{clean}} = r - L(L^\top L)^{+}L^\top r$.
+
+Without a low-pass the uncensored scans get exactly the values of a regression with one
+spike regressor per censored scan. With a low-pass this order matters: a joint regression
+with spike regressors would force the filtered signal to the mean at every censored scan
+and pull the pass-band signal towards the mean around it. The cleaned values of censored
+scans are interpolated, not measured; the `outlier` column of `covars` marks them, so later
+steps (e.g. [Parcellation](Parcellation.md) with `ExcludeOutliers`) can leave them out.
+Without censoring the three stages are identical to the joint regression above.
 
 ## Outputs
 
@@ -132,14 +147,14 @@ scan is the voxel mean. The `outlier` column of `covars` marks these scans, so l
   `outlier` (0/1) and the tissue signals (`white_matter`, `csf` or `wm_comp_cor_01`, ...,
   `csf_comp_cor_01`, ...).
 * `design_matrix` (`q<target>_design.tsv`): the whole $X$ with named columns: motion,
-  `framewise_displacement`, tissue, `motion_outlier01`, ..., `dct_constant`, `dct_hp01`, ...,
-  `dct_lp001`, ...
+  `framewise_displacement`, tissue, `dct_constant`, `dct_hp01`, ..., `dct_lp001`, ...
+  (censored scans are in `covars`, column `outlier`).
 
 Both are tab-separated text with a header line (missing values `n/a`), readable by
 `metools.util.readTsv` or `pandas.read_csv(f, sep='\t')`.
 
 **QC** (with logging): number of scans, regressors, censored scans, filter columns,
-degrees of freedom left, mean FD and the list of regressors.
+degrees of freedom left (approximately), mean FD and the list of regressors.
 
 Two cleanings in one pipeline (e.g. smoothed data for voxel-wise analyses, unsmoothed for
 connectivity) are two steps with different `Target`/`Out`; their files do not collide
@@ -147,13 +162,9 @@ because the names are derived from the output.
 
 ## Known issues
 
-* **Censoring together with a low-pass filter distorts the signal around censored scans.**
-  A spike regressor removes the scan from the fit, so the cleaned signal is the best
-  pass-band signal that equals the mean at the censored scan. Its pass-band content is
-  pulled towards the mean in the neighbourhood of every censored scan (roughly
-  $\pm 1/(2\,\mathrm{Band}(2))$ seconds). Without a low-pass (`Band(2) = Inf`) the effect
-  is negligible. Better approaches (fit on the uncensored scans, interpolate the censored
-  ones, then filter; Power et al. 2014) are in [TODO](../TODO.md).
+* The interpolated value of a censored scan is only an estimate; fast fluctuations
+  (above the pass band) at a censored scan cannot be recovered, so a small part of the
+  interpolation error remains in the pass band around it.
 
 * The masks are resampled to the mean image, which must be in the same space as the
   `Signal` image (normalised data).
